@@ -46,7 +46,7 @@ public class EvpProxyApi implements BackendApi {
       HttpClient httpClient,
       boolean responseCompression) {
     this.traceId = traceId;
-    this.evpProxyUrl = evpProxyUrl.resolve("api/" + API_VERSION + "/");
+    this.evpProxyUrl = evpProxyUrl.resolve("/api/" + API_VERSION + "/");
     this.subdomain = subdomain;
     this.retryPolicyFactory = retryPolicyFactory;
     this.httpClient = httpClient;
@@ -73,8 +73,7 @@ public class EvpProxyApi implements BackendApi {
             .addHeader(CONTENT_TYPE, contentType);
 
     if (requestListener != null) {
-      // TODO: Add support for event listeners in abstract API
-      // requestBuilder.tag(HttpUtils.CustomListener.class, requestListener);
+      requestBuilder.listener(requestListener);
     }
 
     if (requestCompression) {
