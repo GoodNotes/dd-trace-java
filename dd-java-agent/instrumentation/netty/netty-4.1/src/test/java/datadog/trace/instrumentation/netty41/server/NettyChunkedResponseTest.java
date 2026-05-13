@@ -316,7 +316,7 @@ public class NettyChunkedResponseTest extends AbstractInstrumentationTest {
     private void handleChunked(ChannelHandlerContext ctx) {
       DefaultHttpResponse headers = new DefaultHttpResponse(HTTP_1_1, OK);
       headers.headers().set(HttpHeaderNames.TRANSFER_ENCODING, HttpHeaderValues.CHUNKED);
-      ctx.write(headers);
+      ctx.writeAndFlush(headers);
 
       ctx.executor()
           .execute(
