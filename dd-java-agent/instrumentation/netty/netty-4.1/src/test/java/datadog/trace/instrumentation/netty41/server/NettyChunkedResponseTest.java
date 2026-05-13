@@ -91,6 +91,12 @@ public class NettyChunkedResponseTest extends AbstractInstrumentationTest {
     }
   }
 
+  /**
+   * Verifies that the span for a chunked HTTP response covers the full streaming duration, not just
+   * the time to send headers. Without the fix in HttpServerResponseTracingHandler, the span would
+   * finish when HttpResponse (headers) is written (~0ms), ignoring the time spent writing
+   * HttpContent chunks and LastHttpContent.
+   */
   @Test
   void chunkedResponseSpanIncludesFullStreamDuration() throws Exception {
     String body = doGet("/chunked");
@@ -119,6 +125,11 @@ public class NettyChunkedResponseTest extends AbstractInstrumentationTest {
                     tag("peer.ipv4", any()))));
   }
 
+  /**
+   * Regression test: a non-chunked FullHttpResponse must still finish the span immediately. This
+   * ensures the instanceof ordering fix (FullHttpResponse checked before HttpResponse and
+   * LastHttpContent) does not break the standard single-message response path.
+   */
   @Test
   void fullResponseStillFinishesSpanImmediately() throws Exception {
     String body = doGet("/full");
@@ -145,6 +156,13 @@ public class NettyChunkedResponseTest extends AbstractInstrumentationTest {
                     tag("peer.ipv4", any()))));
   }
 
+  /**
+   * Verifies that sequential chunked requests on the same keep-alive connection each get their own
+   * span with correct duration. Without the STREAMING_CONTEXT_KEY fix, Netty's event loop can
+   * process channelRead for the next request (overwriting CONTEXT_ATTRIBUTE_KEY) before the pending
+   * write of the previous response's LastHttpContent runs — causing handleLastHttpContent to finish
+   * the wrong span.
+   */
   @Test
   void keepAliveSequentialChunkedRequestsGetCorrectSpans() throws Exception {
     URL url = new URL("http://localhost:" + port + "/chunked");
@@ -202,18 +220,23 @@ public class NettyChunkedResponseTest extends AbstractInstrumentationTest {
                     tag("peer.ipv4", any()))));
   }
 
+  /**
+   * Verifies that a streaming span is properly finished (not leaked) when the client disconnects
+   * mid-stream. Without the channelInactive fix in HttpServerRequestTracingHandler, the span stored
+   * in STREAMING_CONTEXT_KEY would never be finished if LastHttpContent is never written because
+   * the connection dropped.
+   */
   @Test
   void connectionDropDuringChunkedResponseFinishesSpan() throws Exception {
-    // Open a raw socket, send the request, then close before the server finishes streaming.
-    // This tests the channelInactive handler: the span in STREAMING_CONTEXT_KEY must be
-    // finished when the channel becomes inactive, not leaked.
     try (Socket socket = new Socket("localhost", port)) {
+      socket.setSoTimeout(5000);
       socket
           .getOutputStream()
           .write("GET /slow-chunked HTTP/1.1\r\nHost: localhost\r\n\r\n".getBytes());
       socket.getOutputStream().flush();
-      // Wait for headers + first chunk, then close before streaming completes
-      Thread.sleep(800);
+      // Read until we get at least the first chunk — synchronization point before closing
+      byte[] buf = new byte[512];
+      socket.getInputStream().read(buf);
     }
     // Socket closed — channelInactive should fire and finish the streaming span
 
