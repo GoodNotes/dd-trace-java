@@ -35,6 +35,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -201,6 +202,51 @@ public class NettyChunkedResponseTest extends AbstractInstrumentationTest {
                     tag("peer.ipv4", any()))));
   }
 
+  @Test
+  void connectionDropDuringChunkedResponseFinishesSpan() throws Exception {
+    // Open a raw socket, send the request, then close before the server finishes streaming.
+    // This tests the channelInactive handler: the span in STREAMING_CONTEXT_KEY must be
+    // finished when the channel becomes inactive, not leaked.
+    try (Socket socket = new Socket("localhost", port)) {
+      socket
+          .getOutputStream()
+          .write("GET /slow-chunked HTTP/1.1\r\nHost: localhost\r\n\r\n".getBytes());
+      socket.getOutputStream().flush();
+      // Wait for headers + first chunk, then close before streaming completes
+      Thread.sleep(800);
+    }
+    // Socket closed — channelInactive should fire and finish the streaming span
+
+    Thread.sleep(1500);
+
+    // The span must be finished (not leaked) and marked as error since the channel
+    // closed before the response completed. Duration should be much shorter than
+    // the full 10s streaming time since we disconnected early.
+    assertTraces(
+        trace(
+            span()
+                .root()
+                .operationName(NETTY_REQUEST)
+                .resourceName(Pattern.compile("GET /slow-chunked"))
+                .type("web")
+                .error()
+                .durationShorterThan(Duration.ofMillis(5000))
+                .tags(
+                    defaultTags(),
+                    tag("http.status_code", is(200)),
+                    tag("http.method", any()),
+                    tag("http.url", any()),
+                    tag("http.hostname", any()),
+                    tag("http.useragent", any()),
+                    tag("component", any()),
+                    tag("span.kind", any()),
+                    tag("peer.port", any()),
+                    tag("peer.ipv4", any()),
+                    tag("error.type", any()),
+                    tag("error.message", any()),
+                    tag("error.stack", any()))));
+  }
+
   private String doGet(String path) throws Exception {
     URL url = new URL("http://localhost:" + port + path);
     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -229,6 +275,8 @@ public class NettyChunkedResponseTest extends AbstractInstrumentationTest {
       String uri = request.uri();
       if ("/chunked".equals(uri)) {
         handleChunked(ctx);
+      } else if ("/slow-chunked".equals(uri)) {
+        handleSlowChunked(ctx);
       } else if ("/full".equals(uri)) {
         handleFull(ctx);
       } else {
@@ -260,6 +308,32 @@ public class NettyChunkedResponseTest extends AbstractInstrumentationTest {
                 } catch (InterruptedException e) {
                   Thread.currentThread().interrupt();
                   ctx.close();
+                }
+              });
+    }
+
+    private void handleSlowChunked(ChannelHandlerContext ctx) {
+      DefaultHttpResponse headers = new DefaultHttpResponse(HTTP_1_1, OK);
+      headers.headers().set(HttpHeaderNames.TRANSFER_ENCODING, HttpHeaderValues.CHUNKED);
+      ctx.writeAndFlush(headers);
+
+      // Long streaming — 20 chunks × 500ms = 10s. The test will close the client socket
+      // after the first chunk, triggering channelInactive before LastHttpContent is sent.
+      ctx.executor()
+          .execute(
+              () -> {
+                try {
+                  for (int i = 0; i < 20; i++) {
+                    if (!ctx.channel().isActive()) {
+                      return;
+                    }
+                    Thread.sleep(500);
+                    byte[] data = ("slow" + i).getBytes(StandardCharsets.UTF_8);
+                    ctx.writeAndFlush(new DefaultHttpContent(Unpooled.wrappedBuffer(data)));
+                  }
+                  ctx.writeAndFlush(new DefaultLastHttpContent());
+                } catch (Exception e) {
+                  // Channel closed — expected
                 }
               });
     }
