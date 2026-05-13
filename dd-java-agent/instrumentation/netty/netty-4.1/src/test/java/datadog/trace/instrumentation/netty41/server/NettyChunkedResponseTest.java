@@ -157,11 +157,11 @@ public class NettyChunkedResponseTest extends AbstractInstrumentationTest {
   }
 
   /**
-   * Verifies that sequential chunked requests on the same keep-alive connection each get their own
-   * span with correct duration. Without the STREAMING_CONTEXT_KEY fix, Netty's event loop can
-   * process channelRead for the next request (overwriting CONTEXT_ATTRIBUTE_KEY) before the pending
-   * write of the previous response's LastHttpContent runs — causing handleLastHttpContent to finish
-   * the wrong span.
+   * Verifies that two sequential chunked requests each produce a correctly-timed span. This
+   * exercises the STREAMING_CONTEXT_KEY lifecycle across multiple requests on the same connection:
+   * each request must set and clear the key independently. Note: HttpURLConnection sends requests
+   * sequentially (no pipelining), so this does not reproduce the concurrent race condition — it
+   * validates that the streaming context bookkeeping works correctly for back-to-back requests.
    */
   @Test
   void keepAliveSequentialChunkedRequestsGetCorrectSpans() throws Exception {
